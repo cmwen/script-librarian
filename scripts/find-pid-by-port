@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# msl:name Find PID By Port
+# msl:description Find process IDs listening on a TCP port.
+# msl:usage find-pid-by-port <port> [--json]
+# msl:tags process, port, network, diagnostics
+# msl:runtime bash
+# msl:safety read-only
+# msl:deps bash, lsof or ss, ps
+# msl:example find-pid-by-port 3000
+# msl:example find-pid-by-port 5432 --json
+
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: find-pid-by-port <port> [--json]
+
+Find process IDs listening on a TCP port.
+
+Options:
+  --json      Print machine-readable JSON.
+  -h, --help  Show this help.
+USAGE
+}
+
+json=false
+port=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json)
+      json=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [ -n "$port" ]; then
+        printf 'Unexpected argument: %s\n' "$1" >&2
+        usage >&2
+        exit 2
+      fi
+      port="$1"
+      shift
+      ;;
+  esac
+done
+
+if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+  printf 'Port must be a number from 1 to 65535.\n' >&2
+  usage >&2
+  exit 2
+fi
+
+find_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :$port" 2>/dev/null \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+      | sort -u
+    return
+  fi
+  printf 'Need lsof or ss on PATH.\n' >&2
+  exit 127
+}
+
+pids=()
+while IFS= read -r pid; do
+  if [ -n "$pid" ]; then
+    pids+=("$pid")
+  fi
+done < <(find_pids)
+
+if [ "${#pids[@]}" -eq 0 ]; then
+  if [ "$json" = true ]; then
+    printf '{"port":%s,"processes":[]}\n' "$port"
+  else
+    printf 'No listening process found on port %s.\n' "$port" >&2
+  fi
+  exit 1
+fi
+
+if [ "$json" = true ]; then
+  printf '{"port":%s,"processes":[' "$port"
+  first=true
+  for pid in "${pids[@]}"; do
+    command_name="$(ps -p "$pid" -o comm= 2>/dev/null | sed 's/"/\\"/g' || true)"
+    if [ "$first" = false ]; then
+      printf ','
+    fi
+    first=false
+    printf '{"pid":%s,"command":"%s"}' "$pid" "$command_name"
+  done
+  printf ']}\n'
+  exit 0
+fi
+
+printf 'Port %s is used by:\n' "$port"
+for pid in "${pids[@]}"; do
+  command_name="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+  printf '  pid=%s command=%s\n' "$pid" "${command_name:-unknown}"
+done

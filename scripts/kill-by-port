@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# msl:name Kill By Port
+# msl:description Kill processes listening on a TCP port after confirmation.
+# msl:usage kill-by-port <port> [--signal TERM] [--dry-run] [--yes]
+# msl:tags process, port, network, cleanup
+# msl:runtime bash
+# msl:safety requires-confirmation
+# msl:deps bash, lsof or ss, ps, kill
+# msl:example kill-by-port 3000 --dry-run
+# msl:example kill-by-port 3000 --yes
+
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: kill-by-port <port> [--signal TERM] [--dry-run] [--yes]
+
+Kill processes listening on a TCP port.
+
+Options:
+  --signal SIGNAL  Signal to send. Default: TERM.
+  --dry-run        Show what would be killed without sending a signal.
+  --yes            Skip confirmation.
+  -h, --help       Show this help.
+USAGE
+}
+
+port=""
+signal="TERM"
+dry_run=false
+yes=false
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --signal)
+      if [ "$#" -lt 2 ]; then
+        printf '%s\n' '--signal requires a value.' >&2
+        exit 2
+      fi
+      signal="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    --yes|-y)
+      yes=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [ -n "$port" ]; then
+        printf 'Unexpected argument: %s\n' "$1" >&2
+        usage >&2
+        exit 2
+      fi
+      port="$1"
+      shift
+      ;;
+  esac
+done
+
+if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+  printf 'Port must be a number from 1 to 65535.\n' >&2
+  usage >&2
+  exit 2
+fi
+
+if ! [[ "$signal" =~ ^[A-Za-z0-9]+$ ]]; then
+  printf 'Signal must contain only letters and numbers.\n' >&2
+  exit 2
+fi
+
+find_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :$port" 2>/dev/null \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+      | sort -u
+    return
+  fi
+  printf 'Need lsof or ss on PATH.\n' >&2
+  exit 127
+}
+
+pids=()
+while IFS= read -r pid; do
+  if [ -n "$pid" ]; then
+    pids+=("$pid")
+  fi
+done < <(find_pids)
+
+if [ "${#pids[@]}" -eq 0 ]; then
+  printf 'No listening process found on port %s.\n' "$port" >&2
+  exit 1
+fi
+
+printf 'Processes listening on port %s:\n' "$port"
+for pid in "${pids[@]}"; do
+  command_name="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+  printf '  pid=%s command=%s\n' "$pid" "${command_name:-unknown}"
+done
+
+if [ "$dry_run" = true ]; then
+  printf 'Dry run: would send signal %s to %s.\n' "$signal" "${pids[*]}"
+  exit 0
+fi
+
+if [ "$yes" != true ]; then
+  printf 'Send signal %s to these processes? [y/N]\n> ' "$signal"
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES)
+      ;;
+    *)
+      printf 'Canceled.\n'
+      exit 1
+      ;;
+  esac
+fi
+
+for pid in "${pids[@]}"; do
+  kill -s "$signal" "$pid"
+done
+
+printf 'Sent signal %s to %s.\n' "$signal" "${pids[*]}"
